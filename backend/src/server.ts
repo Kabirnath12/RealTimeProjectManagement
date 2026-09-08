@@ -28,26 +28,13 @@ const allowedOrigins = (
   .filter(Boolean);
 
 const corsOptions: cors.CorsOptions = {
-  origin: (origin, callback) => {
-    // Allow requests without an Origin header
-    // such as server-to-server requests and health checks.
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error(`CORS blocked origin: ${origin}`));
-  },
+  origin: allowedOrigins,
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
 
 app.use(express.json());
 
