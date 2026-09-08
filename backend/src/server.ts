@@ -13,25 +13,51 @@ const prisma = new PrismaClient();
 const app = express();
 const server = http.createServer(app);
 
-const allowedOrigins = process.env.CLIENT_URL
-  ? process.env.CLIENT_URL.split(",").map((origin) => origin.trim())
-  : "*";
+/*
+ * CORS
+ *
+ * CLIENT_URL can contain multiple comma-separated origins.
+ * Example:
+ * CLIENT_URL=https://real-time-project-management.vercel.app,http://localhost:5173
+ */
+const allowedOrigins = (
+  process.env.CLIENT_URL || "http://localhost:5173"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests without an Origin header
+    // such as server-to-server requests and health checks.
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+app.use(express.json());
 
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
-    credentials: true
+    credentials: true,
+    methods: ["GET", "POST"]
   }
 });
-
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true
-  })
-);
-
-app.use(express.json());
 
 const PORT = Number(process.env.PORT || 5000);
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
@@ -68,17 +94,23 @@ function auth(
   }
 }
 
-const registerSchema = z.object({
-  name: z.string().min(2),
-  email: z.string().email(),
-  password: z.string().min(6)
-});
-
+/*
+ * Health
+ */
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     service: "project-management-api"
   });
+});
+
+/*
+ * Register
+ */
+const registerSchema = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  password: z.string().min(6)
 });
 
 app.post("/api/auth/register", async (req, res) => {
@@ -88,7 +120,9 @@ app.post("/api/auth/register", async (req, res) => {
     const email = data.email.toLowerCase();
 
     const exists = await prisma.user.findUnique({
-      where: { email }
+      where: {
+        email
+      }
     });
 
     if (exists) {
@@ -97,7 +131,10 @@ app.post("/api/auth/register", async (req, res) => {
       });
     }
 
-    const passwordHash = await bcrypt.hash(data.password, 10);
+    const passwordHash = await bcrypt.hash(
+      data.password,
+      10
+    );
 
     const user = await prisma.user.create({
       data: {
@@ -118,7 +155,7 @@ app.post("/api/auth/register", async (req, res) => {
       }
     );
 
-    res.status(201).json({
+    return res.status(201).json({
       token,
       user: {
         id: user.id,
@@ -127,12 +164,18 @@ app.post("/api/auth/register", async (req, res) => {
       }
     });
   } catch (e) {
-    res.status(400).json({
-      message: e instanceof Error ? e.message : "Invalid request"
+    return res.status(400).json({
+      message:
+        e instanceof Error
+          ? e.message
+          : "Invalid request"
     });
   }
 });
 
+/*
+ * Login
+ */
 app.post("/api/auth/login", async (req, res) => {
   try {
     const data = z
@@ -150,7 +193,10 @@ app.post("/api/auth/login", async (req, res) => {
 
     if (
       !user ||
-      !(await bcrypt.compare(data.password, user.passwordHash))
+      !(await bcrypt.compare(
+        data.password,
+        user.passwordHash
+      ))
     ) {
       return res.status(401).json({
         message: "Invalid email or password"
@@ -168,7 +214,7 @@ app.post("/api/auth/login", async (req, res) => {
       }
     );
 
-    res.json({
+    return res.json({
       token,
       user: {
         id: user.id,
@@ -177,91 +223,120 @@ app.post("/api/auth/login", async (req, res) => {
       }
     });
   } catch {
-    res.status(400).json({
+    return res.status(400).json({
       message: "Invalid request"
     });
   }
 });
 
-app.get("/api/me", auth, async (req: AuthRequest, res) => {
-  const user = await prisma.user.findUnique({
-    where: {
-      id: req.user!.id
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      createdAt: true
-    }
-  });
-
-  res.json(user);
-});
-
-app.get("/api/workspaces", auth, async (req: AuthRequest, res) => {
-  const userId = req.user!.id;
-
-  const memberships = await prisma.workspaceMember.findMany({
-    where: {
-      userId
-    },
-    include: {
-      workspace: true
-    },
-    orderBy: {
-      workspace: {
-        createdAt: "desc"
+/*
+ * Current user
+ */
+app.get(
+  "/api/me",
+  auth,
+  async (req: AuthRequest, res) => {
+    const user = await prisma.user.findUnique({
+      where: {
+        id: req.user!.id
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true
       }
-    }
-  });
+    });
 
-  res.json(
-    memberships.map((membership) => ({
-      ...membership.workspace,
-      role: membership.role
-    }))
-  );
-});
+    return res.json(user);
+  }
+);
 
-app.post("/api/workspaces", auth, async (req: AuthRequest, res) => {
-  const userId = req.user!.id;
+/*
+ * Get workspaces
+ */
+app.get(
+  "/api/workspaces",
+  auth,
+  async (req: AuthRequest, res) => {
+    const userId = req.user!.id;
 
-  const name = z
-    .object({
-      name: z.string().min(2)
-    })
-    .parse(req.body).name;
-
-  const workspace = await prisma.workspace.create({
-    data: {
-      name,
-      ownerId: userId,
-      members: {
-        create: {
-          userId,
-          role: "OWNER"
+    const memberships =
+      await prisma.workspaceMember.findMany({
+        where: {
+          userId
+        },
+        include: {
+          workspace: true
+        },
+        orderBy: {
+          workspace: {
+            createdAt: "desc"
+          }
         }
-      }
-    }
-  });
+      });
 
-  res.status(201).json(workspace);
-});
+    return res.json(
+      memberships.map((membership) => ({
+        ...membership.workspace,
+        role: membership.role
+      }))
+    );
+  }
+);
 
+/*
+ * Create workspace
+ */
+app.post(
+  "/api/workspaces",
+  auth,
+  async (req: AuthRequest, res) => {
+    const userId = req.user!.id;
+
+    const name = z
+      .object({
+        name: z.string().min(2)
+      })
+      .parse(req.body).name;
+
+    const workspace =
+      await prisma.workspace.create({
+        data: {
+          name,
+          ownerId: userId,
+          members: {
+            create: {
+              userId,
+              role: "OWNER"
+            }
+          }
+        }
+      });
+
+    return res.status(201).json(workspace);
+  }
+);
+
+/*
+ * Get projects in workspace
+ */
 app.get(
   "/api/workspaces/:workspaceId/projects",
   auth,
   async (req: AuthRequest, res) => {
-    const workspaceId = req.params.workspaceId as string;
+    const workspaceId =
+      req.params.workspaceId as string;
+
     const userId = req.user!.id;
 
-    const membership = await prisma.workspaceMember.findFirst({
-      where: {
-        workspaceId,
-        userId
-      }
-    });
+    const membership =
+      await prisma.workspaceMember.findFirst({
+        where: {
+          workspaceId,
+          userId
+        }
+      });
 
     if (!membership) {
       return res.status(403).json({
@@ -269,39 +344,46 @@ app.get(
       });
     }
 
-    const projects = await prisma.project.findMany({
-      where: {
-        workspaceId
-      },
-      include: {
-        tasks: {
-          orderBy: {
-            position: "asc"
+    const projects =
+      await prisma.project.findMany({
+        where: {
+          workspaceId
+        },
+        include: {
+          tasks: {
+            orderBy: {
+              position: "asc"
+            }
           }
+        },
+        orderBy: {
+          createdAt: "desc"
         }
-      },
-      orderBy: {
-        createdAt: "desc"
-      }
-    });
+      });
 
-    res.json(projects);
+    return res.json(projects);
   }
 );
 
+/*
+ * Create project
+ */
 app.post(
   "/api/workspaces/:workspaceId/projects",
   auth,
   async (req: AuthRequest, res) => {
-    const workspaceId = req.params.workspaceId as string;
+    const workspaceId =
+      req.params.workspaceId as string;
+
     const userId = req.user!.id;
 
-    const membership = await prisma.workspaceMember.findFirst({
-      where: {
-        workspaceId,
-        userId
-      }
-    });
+    const membership =
+      await prisma.workspaceMember.findFirst({
+        where: {
+          workspaceId,
+          userId
+        }
+      });
 
     if (!membership) {
       return res.status(403).json({
@@ -316,22 +398,29 @@ app.post(
       })
       .parse(req.body);
 
-    const project = await prisma.project.create({
-      data: {
-        ...data,
-        workspaceId
-      }
-    });
+    const project =
+      await prisma.project.create({
+        data: {
+          name: data.name,
+          description: data.description,
+          workspaceId
+        }
+      });
 
-    res.status(201).json(project);
+    return res.status(201).json(project);
   }
 );
 
+/*
+ * Create task
+ */
 app.post(
   "/api/projects/:projectId/tasks",
   auth,
   async (req: AuthRequest, res) => {
-    const projectId = req.params.projectId as string;
+    const projectId =
+      req.params.projectId as string;
+
     const userId = req.user!.id;
 
     const data = z
@@ -339,20 +428,32 @@ app.post(
         title: z.string().min(1),
         description: z.string().optional(),
         status: z
-          .enum(["TODO", "IN_PROGRESS", "DONE"])
+          .enum([
+            "TODO",
+            "IN_PROGRESS",
+            "DONE"
+          ])
           .default("TODO"),
         priority: z
-          .enum(["LOW", "MEDIUM", "HIGH"])
+          .enum([
+            "LOW",
+            "MEDIUM",
+            "HIGH"
+          ])
           .default("MEDIUM"),
-        dueDate: z.string().datetime().optional()
+        dueDate: z
+          .string()
+          .datetime()
+          .optional()
       })
       .parse(req.body);
 
-    const project = await prisma.project.findUnique({
-      where: {
-        id: projectId
-      }
-    });
+    const project =
+      await prisma.project.findUnique({
+        where: {
+          id: projectId
+        }
+      });
 
     if (!project) {
       return res.status(404).json({
@@ -360,12 +461,13 @@ app.post(
       });
     }
 
-    const member = await prisma.workspaceMember.findFirst({
-      where: {
-        workspaceId: project.workspaceId,
-        userId
-      }
-    });
+    const member =
+      await prisma.workspaceMember.findFirst({
+        where: {
+          workspaceId: project.workspaceId,
+          userId
+        }
+      });
 
     if (!member) {
       return res.status(403).json({
@@ -386,20 +488,24 @@ app.post(
       }
     });
 
-    io.to(`workspace:${project.workspaceId}`).emit(
-      "task:created",
-      task
-    );
+    io
+      .to(`workspace:${project.workspaceId}`)
+      .emit("task:created", task);
 
-    res.status(201).json(task);
+    return res.status(201).json(task);
   }
 );
 
+/*
+ * Update task
+ */
 app.patch(
   "/api/tasks/:taskId",
   auth,
   async (req: AuthRequest, res) => {
-    const taskId = req.params.taskId as string;
+    const taskId =
+      req.params.taskId as string;
+
     const userId = req.user!.id;
 
     const data = z
@@ -407,20 +513,29 @@ app.patch(
         title: z.string().min(1).optional(),
         description: z.string().optional(),
         status: z
-          .enum(["TODO", "IN_PROGRESS", "DONE"])
+          .enum([
+            "TODO",
+            "IN_PROGRESS",
+            "DONE"
+          ])
           .optional(),
         priority: z
-          .enum(["LOW", "MEDIUM", "HIGH"])
+          .enum([
+            "LOW",
+            "MEDIUM",
+            "HIGH"
+          ])
           .optional(),
         position: z.number().int().optional()
       })
       .parse(req.body);
 
-    const task = await prisma.task.findUnique({
-      where: {
-        id: taskId
-      }
-    });
+    const task =
+      await prisma.task.findUnique({
+        where: {
+          id: taskId
+        }
+      });
 
     if (!task) {
       return res.status(404).json({
@@ -428,11 +543,12 @@ app.patch(
       });
     }
 
-    const project = await prisma.project.findUnique({
-      where: {
-        id: task.projectId
-      }
-    });
+    const project =
+      await prisma.project.findUnique({
+        where: {
+          id: task.projectId
+        }
+      });
 
     if (!project) {
       return res.status(404).json({
@@ -440,12 +556,13 @@ app.patch(
       });
     }
 
-    const member = await prisma.workspaceMember.findFirst({
-      where: {
-        workspaceId: project.workspaceId,
-        userId
-      }
-    });
+    const member =
+      await prisma.workspaceMember.findFirst({
+        where: {
+          workspaceId: project.workspaceId,
+          userId
+        }
+      });
 
     if (!member) {
       return res.status(403).json({
@@ -453,34 +570,40 @@ app.patch(
       });
     }
 
-    const updated = await prisma.task.update({
-      where: {
-        id: task.id
-      },
-      data
-    });
+    const updated =
+      await prisma.task.update({
+        where: {
+          id: task.id
+        },
+        data
+      });
 
-    io.to(`workspace:${project.workspaceId}`).emit(
-      "task:updated",
-      updated
-    );
+    io
+      .to(`workspace:${project.workspaceId}`)
+      .emit("task:updated", updated);
 
-    res.json(updated);
+    return res.json(updated);
   }
 );
 
+/*
+ * Delete task
+ */
 app.delete(
   "/api/tasks/:taskId",
   auth,
   async (req: AuthRequest, res) => {
-    const taskId = req.params.taskId as string;
+    const taskId =
+      req.params.taskId as string;
+
     const userId = req.user!.id;
 
-    const task = await prisma.task.findUnique({
-      where: {
-        id: taskId
-      }
-    });
+    const task =
+      await prisma.task.findUnique({
+        where: {
+          id: taskId
+        }
+      });
 
     if (!task) {
       return res.status(404).json({
@@ -488,11 +611,12 @@ app.delete(
       });
     }
 
-    const project = await prisma.project.findUnique({
-      where: {
-        id: task.projectId
-      }
-    });
+    const project =
+      await prisma.project.findUnique({
+        where: {
+          id: task.projectId
+        }
+      });
 
     if (!project) {
       return res.status(404).json({
@@ -500,12 +624,13 @@ app.delete(
       });
     }
 
-    const member = await prisma.workspaceMember.findFirst({
-      where: {
-        workspaceId: project.workspaceId,
-        userId
-      }
-    });
+    const member =
+      await prisma.workspaceMember.findFirst({
+        where: {
+          workspaceId: project.workspaceId,
+          userId
+        }
+      });
 
     if (!member) {
       return res.status(403).json({
@@ -519,23 +644,28 @@ app.delete(
       }
     });
 
-    io.to(`workspace:${project.workspaceId}`).emit(
-      "task:deleted",
-      {
+    io
+      .to(`workspace:${project.workspaceId}`)
+      .emit("task:deleted", {
         id: task.id
-      }
-    );
+      });
 
-    res.status(204).send();
+    return res.status(204).send();
   }
 );
 
+/*
+ * Socket.IO authentication
+ */
 io.use((socket, next) => {
   try {
-    const token = socket.handshake.auth?.token;
+    const token =
+      socket.handshake.auth?.token;
 
     if (!token) {
-      return next(new Error("Authentication required"));
+      return next(
+        new Error("Authentication required")
+      );
     }
 
     socket.data.user = jwt.verify(
@@ -549,22 +679,32 @@ io.use((socket, next) => {
   }
 });
 
+/*
+ * Socket.IO connection
+ */
 io.on("connection", (socket) => {
   socket.on(
     "workspace:join",
     (workspaceId: string) => {
-      socket.join(`workspace:${workspaceId}`);
+      socket.join(
+        `workspace:${workspaceId}`
+      );
     }
   );
 
   socket.on(
     "workspace:leave",
     (workspaceId: string) => {
-      socket.leave(`workspace:${workspaceId}`);
+      socket.leave(
+        `workspace:${workspaceId}`
+      );
     }
   );
 });
 
+/*
+ * Error handler
+ */
 app.use(
   (
     err: unknown,
@@ -574,12 +714,17 @@ app.use(
   ) => {
     console.error(err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Internal server error"
     });
   }
 );
 
+/*
+ * Start server
+ */
 server.listen(PORT, () => {
-  console.log(`API running on http://localhost:${PORT}`);
+  console.log(
+    `API running on http://localhost:${PORT}`
+  );
 });
