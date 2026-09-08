@@ -20,12 +20,14 @@ const server = http.createServer(app);
  * Example:
  * CLIENT_URL=https://real-time-project-management.vercel.app,http://localhost:5173
  */
-const allowedOrigins = (
-  process.env.CLIENT_URL || "http://localhost:5173"
-)
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://real-time-project-management.vercel.app",
+  ...(process.env.CLIENT_URL || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+];
 
 const corsOptions: cors.CorsOptions = {
   origin: allowedOrigins,
